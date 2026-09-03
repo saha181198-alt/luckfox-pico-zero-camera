@@ -1,0 +1,154 @@
+name: Build Pico Zero UVC to ST7735 firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      sdk_ref:
+        description: "Pinned Luckfox SDK Git commit"
+        required: true
+        default: "824b817f889c2cbff1d48fcdb18ab494a68f69d1"
+        type: string
+      artifact_set:
+        description: "Firmware files to upload"
+        required: true
+        default: "update-only"
+        type: choice
+        options:
+          - update-only
+          - all-partitions
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pico-zero-camera-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      SDK_DIR: ${{ github.workspace }}/luckfox-sdk
+      BUILD_LOG: ${{ github.workspace }}/build.log
+      BOARD_CONFIG: project/cfg/BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC.mk
+      SDK_REF: ${{ inputs.sdk_ref }}
+      ARTIFACT_SET: ${{ inputs.artifact_set }}
+
+    steps:
+      - name: Checkout camera project
+        uses: actions/checkout@v4
+
+      - name: Increase available build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 4096
+          swap-size-mb: 8192
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+
+      - name: Install the official SDK dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git ssh make gcc gcc-multilib g++-multilib module-assistant expect \
+            g++ gawk texinfo libssl-dev bison flex fakeroot cmake unzip gperf \
+            autoconf device-tree-compiler libncurses5-dev pkg-config bc \
+            python-is-python3 passwd openssl openssh-server openssh-client \
+            vim file cpio rsync curl xz-utils zstd
+
+      - name: Clone the pinned Luckfox Pico SDK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$SDK_REF" =~ ^[0-9a-f]{40}$ ]]
+          git init "$SDK_DIR"
+          git -C "$SDK_DIR" remote add origin https://github.com/LuckfoxTECH/luckfox-pico.git
+          git -C "$SDK_DIR" fetch --depth=1 --filter=blob:none origin "$SDK_REF"
+          git -C "$SDK_DIR" checkout --detach FETCH_HEAD
+          actual_commit="$(git -C "$SDK_DIR" rev-parse HEAD)"
+          echo "Luckfox SDK commit: $actual_commit"
+          test "$actual_commit" = "$SDK_REF"
+
+          # Deliberately do not run git submodule update. The SDK contains the
+          # ubuntu gitlink but no root .gitmodules entry; Buildroot does not need it.
+          git -C "$SDK_DIR" ls-files -s | awk '$1 == "160000" {print "Ignored SDK gitlink: " $4}'
+
+      - name: Apply Pico Zero camera/display files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/apply-to-sdk.sh "$SDK_DIR"
+          ln -sfn "$BOARD_CONFIG" "$SDK_DIR/.BoardConfig.mk"
+          echo "Selected board: $(readlink "$SDK_DIR/.BoardConfig.mk")"
+          git -C "$SDK_DIR" diff --stat
+
+      - name: Build Buildroot, kernel, boot files and update.img
+        shell: bash
+        run: |
+          set -uo pipefail
+          : >"$BUILD_LOG"
+          cd "$SDK_DIR"
+
+          (
+            while true; do
+              sleep 300
+              echo "[heartbeat] SDK build is still running: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              df -h "$GITHUB_WORKSPACE" | tail -n 1
+              free -h | sed -n '1,2p'
+            done
+          ) &
+          heartbeat_pid=$!
+
+          stdbuf -oL -eL ./build.sh sysdrv 2>&1 | tee "$BUILD_LOG"
+          build_result=${PIPESTATUS[0]}
+          if [ "$build_result" -eq 0 ]; then
+            stdbuf -oL -eL ./build.sh firmware 2>&1 | tee -a "$BUILD_LOG"
+            build_result=${PIPESTATUS[0]}
+          fi
+
+          kill "$heartbeat_pid" 2>/dev/null || true
+          wait "$heartbeat_pid" 2>/dev/null || true
+          exit "$build_result"
+
+      - name: Verify and stage firmware artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          image_dir="$SDK_DIR/output/image"
+          test -s "$image_dir/update.img"
+
+          mkdir -p artifacts
+          cp "$image_dir/update.img" artifacts/
+
+          if [ "$ARTIFACT_SET" = "all-partitions" ]; then
+            find "$image_dir" -maxdepth 1 -type f \( -name '*.img' -o -name '*.bin' \) \
+              ! -name 'update.img' -exec cp -t artifacts {} +
+          fi
+
+          cp "$BUILD_LOG" artifacts/build.log
+          git -C "$SDK_DIR" rev-parse HEAD >artifacts/SDK_COMMIT.txt
+          (cd artifacts && sha256sum -- * >SHA256SUMS.txt)
+          ls -lh artifacts
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-zero-uvc-st7735-${{ github.run_number }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-zero-build-failure-${{ github.run_number }}
+          path: build.log
+          if-no-files-found: warn
+          retention-days: 7
