@@ -1,6 +1,12 @@
 name: Build Pico Zero UVC to ST7735 firmware
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-firmware.yml"
+
   workflow_dispatch:
     inputs:
       sdk_ref:
@@ -28,17 +34,15 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+
     env:
       SDK_DIR: ${{ github.workspace }}/luckfox-sdk
       BUILD_LOG: ${{ github.workspace }}/build.log
       BOARD_CONFIG: project/cfg/BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC.mk
-      SDK_REF: ${{ inputs.sdk_ref }}
-      ARTIFACT_SET: ${{ inputs.artifact_set }}
+      SDK_REF: ${{ inputs.sdk_ref || '824b817f889c2cbff1d48fcdb18ab494a68f69d1' }}
+      ARTIFACT_SET: ${{ inputs.artifact_set || 'update-only' }}
 
     steps:
-      - name: Checkout camera project
-        uses: actions/checkout@v4
-
       - name: Increase available build space
         uses: easimon/maximize-build-space@v10
         with:
@@ -48,6 +52,9 @@ jobs:
           remove-android: "true"
           remove-haskell: "true"
           remove-codeql: "true"
+
+      - name: Checkout camera project
+        uses: actions/checkout@v4
 
       - name: Install the official SDK dependencies
         shell: bash
@@ -66,24 +73,29 @@ jobs:
         run: |
           set -Eeuo pipefail
           [[ "$SDK_REF" =~ ^[0-9a-f]{40}$ ]]
+
           git init "$SDK_DIR"
-          git -C "$SDK_DIR" remote add origin https://github.com/LuckfoxTECH/luckfox-pico.git
-          git -C "$SDK_DIR" fetch --depth=1 --filter=blob:none origin "$SDK_REF"
+          git -C "$SDK_DIR" remote add origin \
+            https://github.com/LuckfoxTECH/luckfox-pico.git
+          git -C "$SDK_DIR" fetch \
+            --depth=1 --filter=blob:none origin "$SDK_REF"
           git -C "$SDK_DIR" checkout --detach FETCH_HEAD
+
           actual_commit="$(git -C "$SDK_DIR" rev-parse HEAD)"
           echo "Luckfox SDK commit: $actual_commit"
           test "$actual_commit" = "$SDK_REF"
 
-          # Deliberately do not run git submodule update. The SDK contains the
-          # ubuntu gitlink but no root .gitmodules entry; Buildroot does not need it.
-          git -C "$SDK_DIR" ls-files -s | awk '$1 == "160000" {print "Ignored SDK gitlink: " $4}'
+          git -C "$SDK_DIR" ls-files -s |
+            awk '$1 == "160000" {print "Ignored SDK gitlink: " $4}'
 
       - name: Apply Pico Zero camera/display files
         shell: bash
         run: |
           set -Eeuo pipefail
+
           bash scripts/apply-to-sdk.sh "$SDK_DIR"
           ln -sfn "$BOARD_CONFIG" "$SDK_DIR/.BoardConfig.mk"
+
           echo "Selected board: $(readlink "$SDK_DIR/.BoardConfig.mk")"
           git -C "$SDK_DIR" diff --stat
 
@@ -97,7 +109,7 @@ jobs:
           (
             while true; do
               sleep 300
-              echo "[heartbeat] SDK build is still running: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              echo "[heartbeat] Build is running: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
               df -h "$GITHUB_WORKSPACE" | tail -n 1
               free -h | sed -n '1,2p'
             done
@@ -106,19 +118,23 @@ jobs:
 
           stdbuf -oL -eL ./build.sh sysdrv 2>&1 | tee "$BUILD_LOG"
           build_result=${PIPESTATUS[0]}
+
           if [ "$build_result" -eq 0 ]; then
-            stdbuf -oL -eL ./build.sh firmware 2>&1 | tee -a "$BUILD_LOG"
+            stdbuf -oL -eL ./build.sh firmware 2>&1 |
+              tee -a "$BUILD_LOG"
             build_result=${PIPESTATUS[0]}
           fi
 
           kill "$heartbeat_pid" 2>/dev/null || true
           wait "$heartbeat_pid" 2>/dev/null || true
+
           exit "$build_result"
 
       - name: Verify and stage firmware artifacts
         shell: bash
         run: |
           set -Eeuo pipefail
+
           image_dir="$SDK_DIR/output/image"
           test -s "$image_dir/update.img"
 
@@ -126,13 +142,21 @@ jobs:
           cp "$image_dir/update.img" artifacts/
 
           if [ "$ARTIFACT_SET" = "all-partitions" ]; then
-            find "$image_dir" -maxdepth 1 -type f \( -name '*.img' -o -name '*.bin' \) \
-              ! -name 'update.img' -exec cp -t artifacts {} +
+            find "$image_dir" -maxdepth 1 -type f \
+              \( -name '*.img' -o -name '*.bin' \) \
+              ! -name 'update.img' \
+              -exec cp -t artifacts {} +
           fi
 
           cp "$BUILD_LOG" artifacts/build.log
-          git -C "$SDK_DIR" rev-parse HEAD >artifacts/SDK_COMMIT.txt
-          (cd artifacts && sha256sum -- * >SHA256SUMS.txt)
+          git -C "$SDK_DIR" rev-parse HEAD \
+            >artifacts/SDK_COMMIT.txt
+
+          (
+            cd artifacts
+            sha256sum -- * >SHA256SUMS.txt
+          )
+
           ls -lh artifacts
 
       - name: Upload firmware
