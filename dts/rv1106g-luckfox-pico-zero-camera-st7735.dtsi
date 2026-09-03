@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Luckfox Pico Zero RV1106G3:
+ *   - USB2 controller in host mode for a UVC capture device
+ *   - ST7735R 128x160 on SPI0 CS0, rotated to 160x128
+ *
+ * Physical header pins:
+ *   SCK=23 (GPIO1_C1), MOSI=19 (GPIO1_C2), CS=24 (GPIO1_C0)
+ *   DC=26 (GPIO1_D2), RESET=22 (GPIO1_D3)
+ */
+
+&usbdrd_dwc3 {
+	status = "okay";
+	dr_mode = "host";
+};
+
+&spi0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi0m0_clk &spi0m0_mosi &spi0m0_cs0>;
+
+	/* CS0 can have only one enabled child. */
+	spidev@0 {
+		status = "disabled";
+	};
+
+	fbtft@0 {
+		compatible = "sitronix,st7735r";
+		reg = <0>;
+		spi-max-frequency = <32000000>;
+		buswidth = <8>;
+		rotate = <90>;
+		fps = <25>;
+		bgr;
+		pinctrl-names = "default";
+		pinctrl-0 = <&st7735_dc_pin &st7735_reset_pin>;
+		dc-gpios = <&gpio1 RK_PD2 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio1 RK_PD3 GPIO_ACTIVE_LOW>;
+		status = "okay";
+	};
+};
+
+&pinctrl {
+	st7735-camera-display {
+		st7735_dc_pin: st7735-dc-pin {
+			rockchip,pins = <1 RK_PD2 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		st7735_reset_pin: st7735-reset-pin {
+			rockchip,pins = <1 RK_PD3 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};

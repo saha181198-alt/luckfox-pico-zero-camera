@@ -1,0 +1,174 @@
+#!/bin/sh
+# Continuously connect a USB UVC camera to the 160x128 ST7735 framebuffer.
+
+set -u
+
+CONFIG_FILE="${CAMERA_DISPLAY_CONFIG:-/etc/camera-display.conf}"
+VIDEO_DEVICE=auto
+INPUT_FORMAT=auto
+VIDEO_SIZE=auto
+FRAMERATE=auto
+FB_DEVICE=/dev/fb0
+DISPLAY_FPS=25
+FIT_MODE=fill
+FFMPEG_LOG_LEVEL=warning
+FFMPEG_PID=""
+
+if [ -r "$CONFIG_FILE" ]; then
+    # This file is root-owned and contains simple shell variable assignments.
+    . "$CONFIG_FILE"
+fi
+
+log_message() {
+    message="$*"
+    if command -v logger >/dev/null 2>&1; then
+        logger -t camera-display "$message"
+    fi
+    echo "camera-display: $message" >&2
+}
+
+stop_child() {
+    if [ -n "$FFMPEG_PID" ]; then
+        kill "$FFMPEG_PID" 2>/dev/null || true
+        wait "$FFMPEG_PID" 2>/dev/null || true
+        FFMPEG_PID=""
+    fi
+}
+
+terminate() {
+    stop_child
+    exit 0
+}
+
+trap terminate INT TERM HUP
+
+find_uvc_device() {
+    for device in /dev/video*; do
+        [ -c "$device" ] || continue
+        description="$(v4l2-ctl --device "$device" --info 2>/dev/null || true)"
+        echo "$description" | grep -qi 'uvcvideo' || continue
+        formats="$(v4l2-ctl --device "$device" --list-formats-ext 2>/dev/null || true)"
+        echo "$formats" | grep -Eq "'MJPG'|'YUYV'" || continue
+        echo "$device"
+        return 0
+    done
+    return 1
+}
+
+make_filter() {
+    case "$FIT_MODE" in
+        fill)
+            echo "scale=160:128:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=160:128,fps=${DISPLAY_FPS},format=rgb565le"
+            ;;
+        fit)
+            echo "scale=160:128:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=160:128:(ow-iw)/2:(oh-ih)/2:black,fps=${DISPLAY_FPS},format=rgb565le"
+            ;;
+        stretch)
+            echo "scale=160:128:flags=fast_bilinear,fps=${DISPLAY_FPS},format=rgb565le"
+            ;;
+        *)
+            log_message "unknown FIT_MODE=$FIT_MODE; using fill"
+            echo "scale=160:128:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=160:128,fps=${DISPLAY_FPS},format=rgb565le"
+            ;;
+    esac
+}
+
+run_profile() {
+    device="$1"
+    pixel_format="$2"
+    frame_size="$3"
+    frame_rate="$4"
+    video_filter="$(make_filter)"
+
+    log_message "trying $device: format=$pixel_format size=$frame_size fps=$frame_rate"
+    ffmpeg \
+        -hide_banner \
+        -nostdin \
+        -loglevel "$FFMPEG_LOG_LEVEL" \
+        -fflags nobuffer \
+        -flags low_delay \
+        -thread_queue_size 1 \
+        -f video4linux2 \
+        -input_format "$pixel_format" \
+        -video_size "$frame_size" \
+        -framerate "$frame_rate" \
+        -i "$device" \
+        -an \
+        -filter_threads 1 \
+        -threads 1 \
+        -vf "$video_filter" \
+        -pix_fmt rgb565le \
+        -f fbdev \
+        -y "$FB_DEVICE" &
+    FFMPEG_PID=$!
+    wait "$FFMPEG_PID"
+    result=$?
+    FFMPEG_PID=""
+    return "$result"
+}
+
+run_automatic_profiles() {
+    device="$1"
+
+    # Prefer smaller MJPEG modes: low CPU/RAM use and low USB bandwidth.
+    # If a converter lacks one mode, FFmpeg exits quickly and the next is tried.
+    while read -r pixel_format frame_size frame_rate; do
+        [ -n "$pixel_format" ] || continue
+        run_profile "$device" "$pixel_format" "$frame_size" "$frame_rate"
+    done <<'EOF'
+mjpeg 640x480 30
+mjpeg 720x576 25
+mjpeg 720x480 30
+mjpeg 1280x720 30
+mjpeg 1920x1080 30
+yuyv422 640x480 30
+yuyv422 720x576 25
+yuyv422 720x480 30
+yuyv422 1920x1080 5
+EOF
+}
+
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    log_message "ffmpeg is missing"
+    exit 1
+fi
+if ! command -v v4l2-ctl >/dev/null 2>&1; then
+    log_message "v4l2-ctl is missing"
+    exit 1
+fi
+
+while :; do
+    if [ ! -c "$FB_DEVICE" ]; then
+        log_message "waiting for framebuffer $FB_DEVICE"
+        sleep 2
+        continue
+    fi
+
+    if [ "$VIDEO_DEVICE" = "auto" ]; then
+        selected_device="$(find_uvc_device || true)"
+    else
+        selected_device="$VIDEO_DEVICE"
+    fi
+
+    if [ -z "$selected_device" ] || [ ! -c "$selected_device" ]; then
+        log_message "waiting for a UVC capture device"
+        sleep 2
+        continue
+    fi
+
+    if [ "$INPUT_FORMAT" != "auto" ] || [ "$VIDEO_SIZE" != "auto" ] || [ "$FRAMERATE" != "auto" ]; then
+        selected_format="$INPUT_FORMAT"
+        selected_size="$VIDEO_SIZE"
+        selected_rate="$FRAMERATE"
+        [ "$selected_format" != "auto" ] || selected_format=mjpeg
+        [ "$selected_size" != "auto" ] || selected_size=640x480
+        [ "$selected_rate" != "auto" ] || selected_rate=30
+        run_profile "$selected_device" "$selected_format" "$selected_size" "$selected_rate" || true
+    else
+        run_automatic_profiles "$selected_device" || true
+    fi
+
+    log_message "capture stopped; retrying"
+    sleep 2
+done
+

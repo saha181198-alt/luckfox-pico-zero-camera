@@ -1,0 +1,28 @@
+#!/bin/sh
+
+set -eu
+
+SERVICE=/etc/init.d/S99camera-display
+FB_DEVICE="${1:-/dev/fb0}"
+
+if [ ! -c "$FB_DEVICE" ]; then
+    echo "ERROR: framebuffer not found: $FB_DEVICE" >&2
+    exit 1
+fi
+
+"$SERVICE" stop || true
+trap '"$SERVICE" start >/dev/null 2>&1 || true' EXIT INT TERM
+
+echo "Showing a 10-second test image on $FB_DEVICE"
+ffmpeg \
+    -hide_banner \
+    -nostdin \
+    -loglevel warning \
+    -f lavfi \
+    -i testsrc2=size=160x128:rate=15 \
+    -t 10 \
+    -vf format=rgb565le \
+    -pix_fmt rgb565le \
+    -f fbdev \
+    -y "$FB_DEVICE"
+

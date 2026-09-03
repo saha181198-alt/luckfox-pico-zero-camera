@@ -1,0 +1,50 @@
+diff --git a/project/cfg/BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC.mk b/project/cfg/BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC.mk
+--- a/project/cfg/BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC.mk
++++ b/project/cfg/BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC.mk
+@@ -11,6 +11,6 @@ export RK_APP_TYPE=RKIPC_RV1106
+ 
+ # Config CMA size in environment
+-export RK_BOOTARGS_CMA_SIZE="100M"
++export RK_BOOTARGS_CMA_SIZE="32M"
+ 
+ # Kernel dts
+ export RK_KERNEL_DTS=rv1106g-luckfox-pico-zero.dts
+@@ -84,6 +84,6 @@ export RK_KERNEL_DEFCONFIG=luckfox_rv1106_linux_defconfig
+ 
+ # Kernel defconfig fragment
+-export RK_KERNEL_DEFCONFIG_FRAGMENT=rv1106-bt.config
++export RK_KERNEL_DEFCONFIG_FRAGMENT="rv1106-bt.config rv1106-camera-st7735.config"
+ 
+ # Config sensor IQ files
+ # RK_CAMERA_SENSOR_IQFILES format:
+@@ -126,3 +126,3 @@ export RK_PRE_BUILD_USERDATA_SCRIPT=luckfox-userdata-pre.sh
+ 
+ # declare overlay directory
+-export RK_POST_OVERLAY="overlay-luckfox-config overlay-luckfox-buildroot-init overlay-luckfox-buildroot-shadow"
++export RK_POST_OVERLAY="overlay-luckfox-config overlay-luckfox-buildroot-init overlay-luckfox-buildroot-shadow overlay-camera-st7735"
+diff --git a/sysdrv/source/kernel/arch/arm/boot/dts/rv1106g-luckfox-pico-zero.dts b/sysdrv/source/kernel/arch/arm/boot/dts/rv1106g-luckfox-pico-zero.dts
+--- a/sysdrv/source/kernel/arch/arm/boot/dts/rv1106g-luckfox-pico-zero.dts
++++ b/sysdrv/source/kernel/arch/arm/boot/dts/rv1106g-luckfox-pico-zero.dts
+@@ -144,3 +144,5 @@
+ 		spi-max-frequency = <50000000>;
+ 	};
+ };
++
++#include "rv1106g-luckfox-pico-zero-camera-st7735.dtsi"
+diff --git a/sysdrv/tools/board/buildroot/luckfox_pico_w_defconfig b/sysdrv/tools/board/buildroot/luckfox_pico_w_defconfig
+--- a/sysdrv/tools/board/buildroot/luckfox_pico_w_defconfig
++++ b/sysdrv/tools/board/buildroot/luckfox_pico_w_defconfig
+@@ -25,8 +25,13 @@ BR2_PACKAGE_BLUEZ_ALSA=y
+ BR2_PACKAGE_BLUEZ_ALSA_HCITOP=y
+ BR2_PACKAGE_BLUEZ_ALSA_RFCOMM=y
++BR2_PACKAGE_FFMPEG=y
++BR2_PACKAGE_FFMPEG_FFMPEG=y
+ BR2_PACKAGE_FFMPEG_FFPLAY=y
+ BR2_PACKAGE_FFMPEG_FFPROBE=y
+ BR2_PACKAGE_FFMPEG_AVRESAMPLE=y
++BR2_PACKAGE_FFMPEG_SWSCALE=y
++BR2_PACKAGE_FFMPEG_INDEVS=y
++BR2_PACKAGE_FFMPEG_OUTDEVS=y
+ BR2_PACKAGE_JACK2=y
+ BR2_PACKAGE_JACK2_LEGACY=y
+ BR2_PACKAGE_JACK2_DBUS=y

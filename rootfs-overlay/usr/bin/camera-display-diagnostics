@@ -1,0 +1,43 @@
+#!/bin/sh
+
+echo "=== SYSTEM ==="
+uname -a
+echo
+
+echo "=== FRAMEBUFFER ==="
+ls -l /dev/fb* 2>/dev/null || echo "No /dev/fb device"
+if command -v fbset >/dev/null 2>&1 && [ -c /dev/fb0 ]; then
+    fbset -fb /dev/fb0 -i 2>&1 || true
+fi
+echo
+
+echo "=== VIDEO DEVICES ==="
+found_video=0
+for device in /dev/video*; do
+    [ -c "$device" ] || continue
+    found_video=1
+    echo "--- $device ---"
+    v4l2-ctl --device "$device" --info 2>&1 || true
+    v4l2-ctl --device "$device" --list-formats-ext 2>&1 || true
+done
+[ "$found_video" -eq 1 ] || echo "No /dev/video device"
+echo
+
+echo "=== USB DEVICES FROM SYSFS ==="
+for node in /sys/bus/usb/devices/*; do
+    [ -r "$node/idVendor" ] || continue
+    vendor="$(cat "$node/idVendor" 2>/dev/null)"
+    product_id="$(cat "$node/idProduct" 2>/dev/null)"
+    product="$(cat "$node/product" 2>/dev/null || true)"
+    echo "$vendor:$product_id $product"
+done
+echo
+
+echo "=== RELEVANT KERNEL LOG ==="
+dmesg | grep -Ei 'uvc|video|usb|spi|st7735|fbtft|framebuffer|fb0' | tail -n 120
+echo
+
+echo "=== SERVICE ==="
+/etc/init.d/S99camera-display status 2>&1 || true
+tail -n 80 /var/log/camera-display.log 2>/dev/null || true
+
