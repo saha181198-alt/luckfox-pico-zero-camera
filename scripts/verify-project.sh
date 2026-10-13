@@ -5,10 +5,12 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 bash -n "$PROJECT_DIR/scripts/apply-to-sdk.sh"
 bash -n "$PROJECT_DIR/scripts/build-local.sh"
+bash -n "$PROJECT_DIR/scripts/verify-usb-debug-config.sh"
 sh -n "$PROJECT_DIR/rootfs-overlay/etc/init.d/S99camera-display"
 sh -n "$PROJECT_DIR/rootfs-overlay/usr/bin/camera-display"
 sh -n "$PROJECT_DIR/rootfs-overlay/usr/bin/camera-display-diagnostics"
 sh -n "$PROJECT_DIR/rootfs-overlay/usr/bin/camera-display-test"
+sh -n "$PROJECT_DIR/rootfs-overlay/usr/bin/usb-host-diagnostics"
 
 # Parse the unified diff without changing files. This catches malformed hunk
 # lengths before a long SDK build is started.
@@ -24,8 +26,10 @@ grep -q 'spi0m0_clk &spi0m0_mosi &spi0m0_cs0' \
 for executable in \
     "$PROJECT_DIR/scripts/apply-to-sdk.sh" \
     "$PROJECT_DIR/scripts/build-local.sh" \
+    "$PROJECT_DIR/scripts/verify-usb-debug-config.sh" \
     "$PROJECT_DIR/rootfs-overlay/etc/init.d/S99camera-display" \
-    "$PROJECT_DIR/rootfs-overlay/usr/bin/camera-display"; do
+    "$PROJECT_DIR/rootfs-overlay/usr/bin/camera-display" \
+    "$PROJECT_DIR/rootfs-overlay/usr/bin/usb-host-diagnostics"; do
     test -x "$executable"
 done
 

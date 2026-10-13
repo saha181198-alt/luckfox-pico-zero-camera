@@ -4,8 +4,14 @@ on:
   push:
     branches:
       - main
+      - codex/usb-host-diagnostics
     paths:
       - ".github/workflows/build-firmware.yml"
+      - "dts/**"
+      - "kernel/**"
+      - "patches/**"
+      - "rootfs-overlay/**"
+      - "scripts/**"
 
   workflow_dispatch:
     inputs:
@@ -22,6 +28,11 @@ on:
         options:
           - update-only
           - all-partitions
+      usb_debug:
+        description: "Enable USB reset/port diagnostics in the kernel"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -32,8 +43,15 @@ concurrency:
 
 jobs:
   build:
+    name: Firmware (USB_DEBUG=${{ matrix.usb_debug }})
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        # Compare identical SDK/project inputs with and without diagnostics.
+        # Other pushes and manual runs retain the selected single profile.
+        usb_debug: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/codex/usb-host-diagnostics' && '[0,1]' || inputs.usb_debug && '[1]' || '[0]') }}
 
     env:
       SDK_DIR: ${{ github.workspace }}/luckfox-sdk
@@ -41,6 +59,7 @@ jobs:
       BOARD_CONFIG: project/cfg/BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC.mk
       SDK_REF: ${{ inputs.sdk_ref || '824b817f889c2cbff1d48fcdb18ab494a68f69d1' }}
       ARTIFACT_SET: ${{ inputs.artifact_set || 'update-only' }}
+      USB_DEBUG: ${{ matrix.usb_debug }}
 
     steps:
       - name: Increase available build space
@@ -55,6 +74,10 @@ jobs:
 
       - name: Checkout camera project
         uses: actions/checkout@v4
+
+      - name: Validate project scripts and patch
+        shell: bash
+        run: bash scripts/verify-project.sh
 
       - name: Install the official SDK dependencies
         shell: bash
@@ -105,6 +128,7 @@ jobs:
           set -uo pipefail
           : >"$BUILD_LOG"
           cd "$SDK_DIR"
+          touch "$GITHUB_WORKSPACE/kernel-build-start"
 
           (
             while true; do
@@ -118,6 +142,17 @@ jobs:
 
           stdbuf -oL -eL ./build.sh sysdrv 2>&1 | tee "$BUILD_LOG"
           build_result=${PIPESTATUS[0]}
+
+          if [ "$build_result" -eq 0 ]; then
+            kernel_config="$SDK_DIR/sysdrv/source/objs_kernel/.config"
+            if [ ! -s "$kernel_config" ] || [ ! "$kernel_config" -nt "$GITHUB_WORKSPACE/kernel-build-start" ]; then
+              echo "ERROR: no fresh generated kernel configuration." | tee -a "$BUILD_LOG"
+              build_result=1
+            elif [ "$USB_DEBUG" = 1 ]; then
+              bash "$GITHUB_WORKSPACE/scripts/verify-usb-debug-config.sh" "$kernel_config" 2>&1 | tee -a "$BUILD_LOG"
+              build_result=${PIPESTATUS[0]}
+            fi
+          fi
 
           if [ "$build_result" -eq 0 ]; then
             stdbuf -oL -eL ./build.sh firmware 2>&1 |
@@ -149,6 +184,10 @@ jobs:
           fi
 
           cp "$BUILD_LOG" artifacts/build.log
+          cp "$SDK_DIR/sysdrv/source/objs_kernel/.config" artifacts/kernel.config
+          cp "$SDK_DIR/project/cfg/BoardConfig_IPC/overlay/overlay-camera-st7735/etc/pico-camera-build-info" \
+            artifacts/pico-camera-build-info.txt
+          git rev-parse HEAD >artifacts/PROJECT_COMMIT.txt
           git -C "$SDK_DIR" rev-parse HEAD \
             >artifacts/SDK_COMMIT.txt
 
@@ -162,7 +201,7 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: pico-zero-uvc-st7735-${{ github.run_number }}
+          name: pico-zero-uvc-st7735-${{ env.USB_DEBUG == '1' && 'usb-debug' || 'normal' }}-${{ github.run_number }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 14
@@ -172,7 +211,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: pico-zero-build-failure-${{ github.run_number }}
-          path: build.log
+          name: pico-zero-build-failure-${{ env.USB_DEBUG == '1' && 'usb-debug' || 'normal' }}-${{ github.run_number }}
+          path: |
+            build.log
+            luckfox-sdk/sysdrv/source/objs_kernel/.config
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7

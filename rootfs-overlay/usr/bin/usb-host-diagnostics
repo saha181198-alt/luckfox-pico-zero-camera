@@ -1,0 +1,197 @@
+#!/bin/sh
+# USB enumeration diagnostics for Luckfox Pico Zero; run from its UART shell.
+# collect is read-only. enable/disable change only two dynamic-debug selectors.
+
+usage() {
+    cat <<'EOF'
+Usage: usb-host-diagnostics [collect|enable|disable]
+
+  collect  Print a report (default); does not mount debugfs or change USB state.
+  enable   Enable kernel debug messages from USB hub reset/port handling.
+  disable  Disable those same messages after reproducing the failure.
+
+Run enable/disable as root with debugfs already mounted. They require a kernel
+built with CONFIG_DYNAMIC_DEBUG=y. No USB role, register, driver binding, or
+console log level is changed. The kernel log is never cleared.
+
+Example, from the board's UART shell:
+  usb-host-diagnostics collect > /tmp/usb-before.txt 2>&1
+  usb-host-diagnostics enable
+  # Reconnect the capture module once, then wait for enumeration to finish.
+  usb-host-diagnostics collect > /tmp/usb-after.txt 2>&1
+  usb-host-diagnostics disable
+  cat /tmp/usb-after.txt
+
+Debug messages are recorded in the kernel log; enabling console output is not
+required. Existing console settings may still print them on UART.
+EOF
+}
+
+section() {
+    printf '\n=== %s ===\n' "$1"
+}
+
+read_value() {
+    if [ -r "$1" ]; then
+        printf '%s: ' "$1"
+        cat "$1"
+    else
+        printf '%s: unavailable\n' "$1"
+    fi
+}
+
+debug_control() {
+    if [ -r /sys/kernel/debug/dynamic_debug/control ]; then
+        printf '%s\n' /sys/kernel/debug/dynamic_debug/control
+        return 0
+    fi
+    return 1
+}
+
+debug_unavailable() {
+    if [ -r /proc/config.gz ] && command -v zcat >/dev/null 2>&1; then
+        if zcat /proc/config.gz 2>/dev/null | grep -q '^# CONFIG_DYNAMIC_DEBUG is not set'; then
+            echo 'CONFIG_DYNAMIC_DEBUG is disabled in this kernel.'
+            echo 'Use a diagnostic firmware build; mounting debugfs cannot add it.'
+            return
+        fi
+    fi
+    if ! grep -q ' /sys/kernel/debug debugfs ' /proc/mounts 2>/dev/null; then
+        echo 'debugfs is not mounted at /sys/kernel/debug.'
+        echo 'To mount it explicitly as root, run:'
+        echo '  mount -t debugfs debugfs /sys/kernel/debug'
+    else
+        echo 'Dynamic-debug control is unavailable although debugfs is mounted.'
+        echo 'Check CONFIG_DYNAMIC_DEBUG=y and permissions in the running kernel.'
+    fi
+}
+
+collect() {
+    section SYSTEM
+    uname -a
+    read_value /etc/pico-camera-build-info
+
+    section 'KERNEL CONFIGURATION'
+    if [ -r /proc/config.gz ] && command -v zcat >/dev/null 2>&1; then
+        zcat /proc/config.gz 2>/dev/null | grep -E '^(# )?CONFIG_(IKCONFIG(_PROC)?|DEBUG_FS|DYNAMIC_DEBUG(_CORE)?|USB_XHCI_HCD|USB_XHCI_PLATFORM|USB_DWC3(_HOST|_GADGET|_DUAL_ROLE|_OF_SIMPLE)?|USB_VIDEO_CLASS|PHY_ROCKCHIP_INNO_USB2|FTRACE|TRACING|EVENT_TRACING|TRACEPOINTS)(=| is not set)' || echo 'Requested configuration flags could not be read.'
+    else
+        echo 'Kernel configuration unavailable (/proc/config.gz or zcat missing).'
+    fi
+
+    section 'USB ROLE'
+    role_path=/proc/device-tree/usbdrd/usb@ffb00000/dr_mode
+    if [ -r "$role_path" ]; then
+        printf '%s: ' "$role_path"
+        tr '\000' '\n' < "$role_path"
+    else
+        printf '%s: unavailable\n' "$role_path"
+    fi
+    read_value /sys/devices/platform/ff3e0000.usb2-phy/otg_mode
+    found=0
+    for node in /sys/class/extcon/extcon*/state; do
+        [ -r "$node" ] || continue
+        found=1
+        printf '%s:\n' "$node"
+        cat "$node"
+    done
+    [ "$found" -eq 1 ] || echo 'No readable extcon state.'
+
+    section 'USB DEVICES'
+    if command -v lsusb >/dev/null 2>&1; then
+        lsusb 2>&1 || echo 'lsusb failed.'
+    else
+        echo 'lsusb is unavailable; reading vendor/product IDs from sysfs.'
+    fi
+    found=0
+    for node in /sys/bus/usb/devices/*; do
+        [ -r "$node/idVendor" ] && [ -r "$node/idProduct" ] || continue
+        found=1
+        printf '%s: %s:%s' "${node##*/}" "$(cat "$node/idVendor")" "$(cat "$node/idProduct")"
+        if [ -r "$node/speed" ]; then
+            printf ' speed=%s Mbit/s' "$(cat "$node/speed")"
+        fi
+        printf '\n'
+    done
+    [ "$found" -eq 1 ] || echo 'No readable USB device IDs in sysfs.'
+
+    section 'VIDEO DEVICE NODES'
+    found=0
+    for node in /dev/video*; do
+        [ -c "$node" ] || continue
+        found=1
+        ls -l "$node"
+    done
+    [ "$found" -eq 1 ] || echo 'No /dev/video device.'
+
+    section 'XHCI PORT STATUS'
+    found=0
+    for node in /sys/kernel/debug/usb/xhci/*/ports/port*/portsc; do
+        [ -r "$node" ] || continue
+        found=1
+        read_value "$node"
+    done
+    [ "$found" -eq 1 ] || echo 'Port status unavailable (debugfs mount or kernel support may be missing).'
+
+    section 'DWC3 REGISTERS (READ ONLY)'
+    register_path=/sys/kernel/debug/usb/ffb00000.usb/regdump
+    if [ -r "$register_path" ]; then
+        grep -E '^(GCTL|GSTS|GSNPSID|GUSB2PHYCFG\(0\)) =' "$register_path" || echo 'Requested registers were not present.'
+    else
+        printf '%s: unavailable\n' "$register_path"
+    fi
+
+    section 'DYNAMIC DEBUG'
+    if control=$(debug_control); then
+        printf 'Control available: %s\n' "$control"
+        echo 'Only hub.c and xhci-hub.c are selected by this tool.'
+    else
+        debug_unavailable
+    fi
+
+    section 'RECENT USB KERNEL LOG (LAST 250 MATCHING LINES)'
+    if kernel_log=$(dmesg 2>&1); then
+        printf '%s\n' "$kernel_log" | grep -Ei 'usb|uvc|xhci|dwc3|phy|extcon' | tail -n 250
+    else
+        printf 'dmesg failed: %s\n' "$kernel_log"
+    fi
+}
+
+set_debug() {
+    if ! control=$(debug_control); then
+        debug_unavailable >&2
+        return 1
+    fi
+    if [ ! -w "$control" ]; then
+        echo 'Dynamic-debug control is not writable; run as root on the board.' >&2
+        return 1
+    fi
+    # Check both selectors before changing either one. No transfer/ring logging.
+    for source_path in drivers/usb/core/hub.c drivers/usb/host/xhci-hub.c; do
+        if ! grep -F "$source_path:" "$control" >/dev/null 2>&1; then
+            printf 'No dynamic-debug call sites found for %s.\n' "$source_path" >&2
+            return 1
+        fi
+    done
+    if ! printf 'file drivers/usb/core/hub.c %s\nfile drivers/usb/host/xhci-hub.c %s\n' "$1" "$1" > "$control"; then
+        echo 'Could not update USB hub dynamic-debug settings.' >&2
+        return 1
+    fi
+    if [ "$1" = '+p' ]; then
+        echo 'USB hub debug messages enabled; reconnect the module once.'
+        echo 'Collect the report promptly, then run usb-host-diagnostics disable.'
+    else
+        echo 'USB hub debug messages disabled for hub.c and xhci-hub.c.'
+    fi
+}
+
+if [ "$#" -gt 1 ]; then
+    usage >&2
+    exit 2
+fi
+case "${1:-collect}" in
+    collect) collect ;;
+    enable) set_debug +p ;;
+    disable) set_debug -p ;;
+    -h|--help|help) usage ;;
+    *) usage >&2; exit 2 ;;
+esac
